@@ -58,6 +58,7 @@ void GlobalOptimization::inputOdom(double t, Eigen::Vector3d OdomP, Eigen::Quate
     lastQ = globalQ;
 
     // 把vio转换坐标系后的结果赋值给global_path，给最新传入的一个初始值。
+    // 当前的vio也会加入到global_path 中，后续收到GPS数据时，会将其全部删除之后，进行更新，所以有时候会看到融合之后的路径发生跳变的情况
     geometry_msgs::PoseStamped pose_stamped;
     pose_stamped.header.stamp = ros::Time(t);
     pose_stamped.header.frame_id = "world";
@@ -95,6 +96,7 @@ void GlobalOptimization::inputGPS(double t, double latitude, double longitude, d
     vector<double> tmp{xyz[0], xyz[1], xyz[2], posAccuracy};
     // printf("new gps: t: %f x: %f y: %f z:%f \n", t, tmp[0], tmp[1], tmp[2]);
     GPSPositionMap[t] = tmp;
+    // 每次获取到新的GPS数据时，设置为true，表示可以开始优化， optimize函数是while循环，每次判断newGPS为true时就会优化
     newGPS = true;
 }
 
@@ -202,13 +204,21 @@ void GlobalOptimization::optimize()
                     */
                 }
                 // gps factor
-                double t = iterVIO->first;
+                double t = iterVIO->first; // t表示的是时间
+                // 在GPSPositionMap中查找是否有与当前时间戳相匹配的GPS数据。GPSPositionMap是一个映射，它将时间戳映射到对应的GPS位置信息
+                // GPS残差，这个观测量直接就是GPS的测量数据，
+                // 残差计算的是GPS和优化变量的差，这个是绝对的差。
                 iterGPS = GPSPositionMap.find(t);
+
                 if (iterGPS != GPSPositionMap.end())
                 {
+                    // 根据找到的GPS数据创建一个Ceres优化的CostFunction对象。这个对象用于计算VIO估计的轨迹与GPS轨迹之间的误差。
+                    // GPS位置信息通常由经度、纬度、高度和权重（或协方差）组成，这里使用了这些信息创建了一个代价函数
                     ceres::CostFunction *gps_function = TError::Create(iterGPS->second[0], iterGPS->second[1],
                                                                        iterGPS->second[2], iterGPS->second[3]);
                     // printf("inverse weight %f \n", iterGPS->second[3]);
+                    // 将上述创建的代价函数添加到Ceres优化问题中作为残差块。这个残差块是用于优化VIO轨迹，
+                    // 它将VIO估计的轨迹与GPS轨迹进行比较，并通过最小化它们之间的差异来调整VIO估计的结果。t_array[i]是VIO优化变量，它表示时间戳对应的位姿。
                     problem.AddResidualBlock(gps_function, loss_function, t_array[i]);
 
                     /*
@@ -236,22 +246,33 @@ void GlobalOptimization::optimize()
             iter = globalPoseMap.begin();
             for (int i = 0; i < length; i++, iter++)
             {
+                // 从VIO优化的位姿数据中提取位置和四元数，构建一个包含全局位姿的向量globalPose
                 vector<double> globalPose{t_array[i][0], t_array[i][1], t_array[i][2],
                                           q_array[i][0], q_array[i][1], q_array[i][2], q_array[i][3]};
+                // 更新全局位姿映射中当前时间戳对应的值为新的全局位姿
                 iter->second = globalPose;
+                // 如果已经遍历到最后一个位姿数据
+                // 用在VIO坐标系下的位置（localPoseMap里）和优化后在GPS坐标系下的位置（globalPose）对外参WGPS_T_WVIO进行更新
                 if (i == length - 1)
                 {
                     Eigen::Matrix4d WVIO_T_body = Eigen::Matrix4d::Identity();
                     Eigen::Matrix4d WGPS_T_body = Eigen::Matrix4d::Identity();
+                    // 获取当前时间戳
                     double t = iter->first;
+                    // 从localPoseMap获取VIO相机坐标系到世界坐标系的旋转矩阵
                     WVIO_T_body.block<3, 3>(0, 0) = Eigen::Quaterniond(localPoseMap[t][3], localPoseMap[t][4],
                                                                        localPoseMap[t][5], localPoseMap[t][6])
                                                         .toRotationMatrix();
+                    // 从localPoseMap获取VIO相机坐标系到世界坐标系的平移向量
                     WVIO_T_body.block<3, 1>(0, 3) = Eigen::Vector3d(localPoseMap[t][0], localPoseMap[t][1], localPoseMap[t][2]);
+                    // 从globalPose获取GPS到世界坐标系的旋转矩阵
                     WGPS_T_body.block<3, 3>(0, 0) = Eigen::Quaterniond(globalPose[3], globalPose[4],
                                                                        globalPose[5], globalPose[6])
                                                         .toRotationMatrix();
+                    // 从globalPose获取GPS到世界坐标系的平移向量
                     WGPS_T_body.block<3, 1>(0, 3) = Eigen::Vector3d(globalPose[0], globalPose[1], globalPose[2]);
+                    // 计算GPS到VIO的变换，即WGPS_T_WVIO
+                    // 外参WGPS_T_WVIO之前是单位矩阵，而第一次更新，会算出真正和实际相符的外参
                     WGPS_T_WVIO = WGPS_T_body * WVIO_T_body.inverse();
                 }
             }
@@ -265,15 +286,22 @@ void GlobalOptimization::optimize()
     return;
 }
 
+// 清空global_path.poses，重新根据globalPoseMap生成
 void GlobalOptimization::updateGlobalPath()
 {
+    // 清空全局路径中的所有位姿
     global_path.poses.clear();
+    // 定义一个迭代器iter，用于遍历globalPoseMap
     map<double, vector<double>>::iterator iter;
     for (iter = globalPoseMap.begin(); iter != globalPoseMap.end(); iter++)
     {
+        // 定义一个geometry_msgs::PoseStamped类型的变量pose_stamped，用于存储位姿信息
         geometry_msgs::PoseStamped pose_stamped;
+        // 设置pose_stamped的时间戳，使用globalPoseMap中的时间戳（迭代器iter的键）
         pose_stamped.header.stamp = ros::Time(iter->first);
+        // 设置pose_stamped的坐标系为“world”
         pose_stamped.header.frame_id = "world";
+        // 设置pose_stamped的位置信息，使用globalPoseMap中的x坐标（迭代器iter的值的第一个元素）
         pose_stamped.pose.position.x = iter->second[0];
         pose_stamped.pose.position.y = iter->second[1];
         pose_stamped.pose.position.z = iter->second[2];
@@ -281,6 +309,7 @@ void GlobalOptimization::updateGlobalPath()
         pose_stamped.pose.orientation.x = iter->second[4];
         pose_stamped.pose.orientation.y = iter->second[5];
         pose_stamped.pose.orientation.z = iter->second[6];
+        // 将构建好的pose_stamped添加到global_path的poses序列中
         global_path.poses.push_back(pose_stamped);
     }
 }

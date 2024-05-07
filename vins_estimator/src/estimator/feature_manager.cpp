@@ -1,8 +1,8 @@
 /*******************************************************
  * Copyright (C) 2019, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *******************************************************/
@@ -48,72 +48,105 @@ int FeatureManager::getFeatureCount()
     return cnt;
 }
 
-
+// 根据当前帧的特征点ID检查该特征点是否已经被观测到，
+// 统计第一次被观测到的特征点数目统计变量new_feature_num，已经被观测到的特征点数目统计变量last_track_num和long_track_num
+// 判断是否为关键帧，考量的标准要多维度考察：
+// ------ 特征点在前一帧和前前一帧上的视差是否足够大
+// ------ 窗口内图像帧数目是否少于2帧
+// ------ 当前帧新观测的特征点数目是否足够多
+// ------ 已经观测到的特征点数目是否足够少
 bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td)
 {
-    ROS_DEBUG("input feature: %d", (int)image.size());
-    ROS_DEBUG("num of feature: %d", getFeatureCount());
+    ROS_DEBUG("input feature: %d", (int)image.size());  // 打印输入特征的数量
+    ROS_DEBUG("num of feature: %d", getFeatureCount()); // 打印当前特征管理器中存储的特征数量
+    // 初始化视差总和为零
     double parallax_sum = 0;
+    // 初始化视差数量为零
     int parallax_num = 0;
+    // 将上次跟踪的特征数量初始化为零
     last_track_num = 0;
+    // 将上次平均视差初始化为零
     last_average_parallax = 0;
+    // 将新添加的特征数量初始化为零
     new_feature_num = 0;
+    // 将长时间跟踪的特征数量初始化为零
     long_track_num = 0;
+    // 遍历输入的特征图像，id_pts 是一个特征 ID 到特征点向量的映射
     for (auto &id_pts : image)
     {
+        // 根据每个特征点的第一个观察构造一个 FeaturePerFrame 对象
         FeaturePerFrame f_per_fra(id_pts.second[0].second, td);
+        // 确保第一个观察的索引为 0
         assert(id_pts.second[0].first == 0);
-        if(id_pts.second.size() == 2)
+        // 如果有第二个观察
+        if (id_pts.second.size() == 2)
         {
             f_per_fra.rightObservation(id_pts.second[1].second);
             assert(id_pts.second[1].first == 1);
         }
-
+        // 获取特征的 ID
         int feature_id = id_pts.first;
+        // 在特征列表中查找是否已经存在该特征 ID
         auto it = find_if(feature.begin(), feature.end(), [feature_id](const FeaturePerId &it)
-                          {
-            return it.feature_id == feature_id;
-                          });
-
+                          { return it.feature_id == feature_id; });
+        // 如果特征不存在
         if (it == feature.end())
         {
+            // 将新特征添加到特征列表中
             feature.push_back(FeaturePerId(feature_id, frame_count));
+            // 将特征点添加到新特征的帧列表中
             feature.back().feature_per_frame.push_back(f_per_fra);
+            // 增加新特征数量
             new_feature_num++;
         }
+        // 如果特征已存在
         else if (it->feature_id == feature_id)
         {
+            // 将特征点添加到现有特征的帧列表中
             it->feature_per_frame.push_back(f_per_fra);
+            // 增加上次跟踪的特征数量
             last_track_num++;
-            if( it-> feature_per_frame.size() >= 4)
+            // 如果现有特征的帧数量大于等于 4
+            if (it->feature_per_frame.size() >= 4)
+                // 增加长时间跟踪的特征数量
                 long_track_num++;
         }
     }
 
-    //if (frame_count < 2 || last_track_num < 20)
-    //if (frame_count < 2 || last_track_num < 20 || new_feature_num > 0.5 * last_track_num)
+    // if (frame_count < 2 || last_track_num < 20)
+    // if (frame_count < 2 || last_track_num < 20 || new_feature_num > 0.5 * last_track_num)
+    // 检查是否满足特征添加的条件，如果满足则返回 true
+    // 窗口内图像少于2帧，已经被观测到的特征点数目小于20，被观测到4次以上的特征点数目小于40，第一次被观测到的特征点的数目大于已经观测
+    // 到特征点的数目的一半，任意一个条件满足则返回 true，认为是关键帧
     if (frame_count < 2 || last_track_num < 20 || long_track_num < 40 || new_feature_num > 0.5 * last_track_num)
         return true;
-
+    // 遍历特征列表
     for (auto &it_per_id : feature)
     {
+        // 求特征点在前一帧和前前一帧之间的视差，这个视差是在归一化平面上归一化坐标的变化，不是成像平面上的坐标变化
         if (it_per_id.start_frame <= frame_count - 2 &&
             it_per_id.start_frame + int(it_per_id.feature_per_frame.size()) - 1 >= frame_count - 1)
         {
+            // 计算视差总和
             parallax_sum += compensatedParallax2(it_per_id, frame_count);
+            // 增加视差数量
             parallax_num++;
         }
     }
-
+    // 如果没有视差测量
     if (parallax_num == 0)
     {
         return true;
     }
     else
     {
+        // 打印视差总和和视差数量
         ROS_DEBUG("parallax_sum: %lf, parallax_num: %d", parallax_sum, parallax_num);
+        // 打印当前视差
         ROS_DEBUG("current parallax: %lf", parallax_sum / parallax_num * FOCAL_LENGTH);
+        // 计算并存储平均视差
         last_average_parallax = parallax_sum / parallax_num * FOCAL_LENGTH;
+        // 如果平均视差大于等于最小视差，则返回 true，认为是关键帧
         return parallax_sum / parallax_num >= MIN_PARALLAX;
     }
 }
@@ -132,7 +165,7 @@ vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_coun
             a = it.feature_per_frame[idx_l].point;
 
             b = it.feature_per_frame[idx_r].point;
-            
+
             corres.push_back(make_pair(a, b));
         }
     }
@@ -149,7 +182,7 @@ void FeatureManager::setDepth(const VectorXd &x)
             continue;
 
         it_per_id.estimated_depth = 1.0 / x(++feature_index);
-        //ROS_INFO("feature id %d , start_frame %d, depth %f ", it_per_id->feature_id, it_per_id-> start_frame, it_per_id->estimated_depth);
+        // ROS_INFO("feature id %d , start_frame %d, depth %f ", it_per_id->feature_id, it_per_id-> start_frame, it_per_id->estimated_depth);
         if (it_per_id.estimated_depth < 0)
         {
             it_per_id.solve_flag = 2;
@@ -194,9 +227,8 @@ VectorXd FeatureManager::getDepthVector()
     return dep_vec;
 }
 
-
 void FeatureManager::triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen::Matrix<double, 3, 4> &Pose1,
-                        Eigen::Vector2d &point0, Eigen::Vector2d &point1, Eigen::Vector3d &point_3d)
+                                      Eigen::Vector2d &point0, Eigen::Vector2d &point1, Eigen::Vector3d &point_3d)
 {
     Eigen::Matrix4d design_matrix = Eigen::Matrix4d::Zero();
     design_matrix.row(0) = point0[0] * Pose0.row(2) - Pose0.row(0);
@@ -205,24 +237,23 @@ void FeatureManager::triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen:
     design_matrix.row(3) = point1[1] * Pose1.row(2) - Pose1.row(1);
     Eigen::Vector4d triangulated_point;
     triangulated_point =
-              design_matrix.jacobiSvd(Eigen::ComputeFullV).matrixV().rightCols<1>();
+        design_matrix.jacobiSvd(Eigen::ComputeFullV).matrixV().rightCols<1>();
     point_3d(0) = triangulated_point(0) / triangulated_point(3);
     point_3d(1) = triangulated_point(1) / triangulated_point(3);
     point_3d(2) = triangulated_point(2) / triangulated_point(3);
 }
 
-
-bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P, 
-                                      vector<cv::Point2f> &pts2D, vector<cv::Point3f> &pts3D)
+bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P,
+                                    vector<cv::Point2f> &pts2D, vector<cv::Point3f> &pts3D)
 {
     Eigen::Matrix3d R_initial;
     Eigen::Vector3d P_initial;
 
-    // w_T_cam ---> cam_T_w 
+    // w_T_cam ---> cam_T_w
     R_initial = R.inverse();
     P_initial = -(R_initial * P);
 
-    //printf("pnp size %d \n",(int)pts2D.size() );
+    // printf("pnp size %d \n",(int)pts2D.size() );
     if (int(pts2D.size()) < 4)
     {
         printf("feature tracking not enough, please slowly move you device! \n");
@@ -232,18 +263,18 @@ bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P,
     cv::eigen2cv(R_initial, tmp_r);
     cv::Rodrigues(tmp_r, rvec);
     cv::eigen2cv(P_initial, t);
-    cv::Mat K = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);  
+    cv::Mat K = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);
     bool pnp_succ;
     pnp_succ = cv::solvePnP(pts3D, pts2D, K, D, rvec, t, 1);
-    //pnp_succ = solvePnPRansac(pts3D, pts2D, K, D, rvec, t, true, 100, 8.0 / focalLength, 0.99, inliers);
+    // pnp_succ = solvePnPRansac(pts3D, pts2D, K, D, rvec, t, true, 100, 8.0 / focalLength, 0.99, inliers);
 
-    if(!pnp_succ)
+    if (!pnp_succ)
     {
         printf("pnp failed ! \n");
         return false;
     }
     cv::Rodrigues(rvec, r);
-    //cout << "r " << endl << r << endl;
+    // cout << "r " << endl << r << endl;
     Eigen::MatrixXd R_pnp;
     cv::cv2eigen(r, R_pnp);
     Eigen::MatrixXd T_pnp;
@@ -259,7 +290,7 @@ bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P,
 void FeatureManager::initFramePoseByPnP(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vector3d tic[], Matrix3d ric[])
 {
 
-    if(frameCnt > 0)
+    if (frameCnt > 0)
     {
         vector<cv::Point2f> pts2D;
         vector<cv::Point3f> pts3D;
@@ -268,7 +299,7 @@ void FeatureManager::initFramePoseByPnP(int frameCnt, Vector3d Ps[], Matrix3d Rs
             if (it_per_id.estimated_depth > 0)
             {
                 int index = frameCnt - it_per_id.start_frame;
-                if((int)it_per_id.feature_per_frame.size() >= index + 1)
+                if ((int)it_per_id.feature_per_frame.size() >= index + 1)
                 {
                     Vector3d ptsInCam = ric[0] * (it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth) + tic[0];
                     Vector3d ptsInWorld = Rs[it_per_id.start_frame] * ptsInCam + Ps[it_per_id.start_frame];
@@ -276,7 +307,7 @@ void FeatureManager::initFramePoseByPnP(int frameCnt, Vector3d Ps[], Matrix3d Rs
                     cv::Point3f point3d(ptsInWorld.x(), ptsInWorld.y(), ptsInWorld.z());
                     cv::Point2f point2d(it_per_id.feature_per_frame[index].point.x(), it_per_id.feature_per_frame[index].point.y());
                     pts3D.push_back(point3d);
-                    pts2D.push_back(point2d); 
+                    pts2D.push_back(point2d);
                 }
             }
         }
@@ -286,15 +317,15 @@ void FeatureManager::initFramePoseByPnP(int frameCnt, Vector3d Ps[], Matrix3d Rs
         RCam = Rs[frameCnt - 1] * ric[0];
         PCam = Rs[frameCnt - 1] * tic[0] + Ps[frameCnt - 1];
 
-        if(solvePoseByPnP(RCam, PCam, pts2D, pts3D))
+        if (solvePoseByPnP(RCam, PCam, pts2D, pts3D))
         {
             // trans to w_T_imu
-            Rs[frameCnt] = RCam * ric[0].transpose(); 
+            Rs[frameCnt] = RCam * ric[0].transpose();
             Ps[frameCnt] = -RCam * ric[0].transpose() * tic[0] + PCam;
 
             Eigen::Quaterniond Q(Rs[frameCnt]);
-            //cout << "frameCnt: " << frameCnt <<  " pnp Q " << Q.w() << " " << Q.vec().transpose() << endl;
-            //cout << "frameCnt: " << frameCnt << " pnp P " << Ps[frameCnt].transpose() << endl;
+            // cout << "frameCnt: " << frameCnt <<  " pnp Q " << Q.w() << " " << Q.vec().transpose() << endl;
+            // cout << "frameCnt: " << frameCnt << " pnp P " << Ps[frameCnt].transpose() << endl;
         }
     }
 }
@@ -306,7 +337,7 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
         if (it_per_id.estimated_depth > 0)
             continue;
 
-        if(STEREO && it_per_id.feature_per_frame[0].is_stereo)
+        if (STEREO && it_per_id.feature_per_frame[0].is_stereo)
         {
             int imu_i = it_per_id.start_frame;
             Eigen::Matrix<double, 3, 4> leftPose;
@@ -314,21 +345,21 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
             Eigen::Matrix3d R0 = Rs[imu_i] * ric[0];
             leftPose.leftCols<3>() = R0.transpose();
             leftPose.rightCols<1>() = -R0.transpose() * t0;
-            //cout << "left pose " << leftPose << endl;
+            // cout << "left pose " << leftPose << endl;
 
             Eigen::Matrix<double, 3, 4> rightPose;
             Eigen::Vector3d t1 = Ps[imu_i] + Rs[imu_i] * tic[1];
             Eigen::Matrix3d R1 = Rs[imu_i] * ric[1];
             rightPose.leftCols<3>() = R1.transpose();
             rightPose.rightCols<1>() = -R1.transpose() * t1;
-            //cout << "right pose " << rightPose << endl;
+            // cout << "right pose " << rightPose << endl;
 
             Eigen::Vector2d point0, point1;
             Eigen::Vector3d point3d;
             point0 = it_per_id.feature_per_frame[0].point.head(2);
             point1 = it_per_id.feature_per_frame[0].pointRight.head(2);
-            //cout << "point0 " << point0.transpose() << endl;
-            //cout << "point1 " << point1.transpose() << endl;
+            // cout << "point0 " << point0.transpose() << endl;
+            // cout << "point1 " << point1.transpose() << endl;
 
             triangulatePoint(leftPose, rightPose, point0, point1, point3d);
             Eigen::Vector3d localPoint;
@@ -345,7 +376,7 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
             */
             continue;
         }
-        else if(it_per_id.feature_per_frame.size() > 1)
+        else if (it_per_id.feature_per_frame.size() > 1)
         {
             int imu_i = it_per_id.start_frame;
             Eigen::Matrix<double, 3, 4> leftPose;
@@ -416,17 +447,16 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
         ROS_ASSERT(svd_idx == svd_A.rows());
         Eigen::Vector4d svd_V = Eigen::JacobiSVD<Eigen::MatrixXd>(svd_A, Eigen::ComputeThinV).matrixV().rightCols<1>();
         double svd_method = svd_V[2] / svd_V[3];
-        //it_per_id->estimated_depth = -b / A;
-        //it_per_id->estimated_depth = svd_V[2] / svd_V[3];
+        // it_per_id->estimated_depth = -b / A;
+        // it_per_id->estimated_depth = svd_V[2] / svd_V[3];
 
         it_per_id.estimated_depth = svd_method;
-        //it_per_id->estimated_depth = INIT_DEPTH;
+        // it_per_id->estimated_depth = INIT_DEPTH;
 
         if (it_per_id.estimated_depth < 0.1)
         {
             it_per_id.estimated_depth = INIT_DEPTH;
         }
-
     }
 }
 
@@ -439,10 +469,10 @@ void FeatureManager::removeOutlier(set<int> &outlierIndex)
         it_next++;
         int index = it->feature_id;
         itSet = outlierIndex.find(index);
-        if(itSet != outlierIndex.end())
+        if (itSet != outlierIndex.end())
         {
             feature.erase(it);
-            //printf("remove outlier %d \n", index);
+            // printf("remove outlier %d \n", index);
         }
     }
 }
@@ -458,7 +488,7 @@ void FeatureManager::removeBackShiftDepth(Eigen::Matrix3d marg_R, Eigen::Vector3
             it->start_frame--;
         else
         {
-            Eigen::Vector3d uv_i = it->feature_per_frame[0].point;  
+            Eigen::Vector3d uv_i = it->feature_per_frame[0].point;
             it->feature_per_frame.erase(it->feature_per_frame.begin());
             if (it->feature_per_frame.size() < 2)
             {
@@ -529,8 +559,8 @@ void FeatureManager::removeFront(int frame_count)
 
 double FeatureManager::compensatedParallax2(const FeaturePerId &it_per_id, int frame_count)
 {
-    //check the second last frame is keyframe or not
-    //parallax betwwen seconde last frame and third last frame
+    // check the second last frame is keyframe or not
+    // parallax betwwen seconde last frame and third last frame
     const FeaturePerFrame &frame_i = it_per_id.feature_per_frame[frame_count - 2 - it_per_id.start_frame];
     const FeaturePerFrame &frame_j = it_per_id.feature_per_frame[frame_count - 1 - it_per_id.start_frame];
 
@@ -543,9 +573,9 @@ double FeatureManager::compensatedParallax2(const FeaturePerId &it_per_id, int f
     Vector3d p_i = frame_i.point;
     Vector3d p_i_comp;
 
-    //int r_i = frame_count - 2;
-    //int r_j = frame_count - 1;
-    //p_i_comp = ric[camera_id_j].transpose() * Rs[r_j].transpose() * Rs[r_i] * ric[camera_id_i] * p_i;
+    // int r_i = frame_count - 2;
+    // int r_j = frame_count - 1;
+    // p_i_comp = ric[camera_id_j].transpose() * Rs[r_j].transpose() * Rs[r_i] * ric[camera_id_i] * p_i;
     p_i_comp = p_i;
     double dep_i = p_i(2);
     double u_i = p_i(0) / dep_i;

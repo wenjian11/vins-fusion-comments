@@ -95,10 +95,14 @@ void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
     vio_q.y() = pose_msg->pose.pose.orientation.y;
     vio_q.z() = pose_msg->pose.pose.orientation.z;
     // 位姿传入global Estimator中
+    // 下面这个函数完成了三个步骤
+    // (1) 将vio_t和vio_q合并为localPose数据放入到localPoseMap
+    // (2) 将vio_t和vio_q都转为第一帧GPS为原点的坐标系下，然后放入到globalPoseMap中，此时vio是还未优化的数据
+    // (3) 然后将当前的vio加入到global_path
     globalEstimator.inputOdom(t, vio_t, vio_q);
 
     m_buf.lock();
-    // 寻找与VIO时间戳相对应的GPS信息
+    // 寻找与VIO时间戳相对应的GPS信息，如果找到时间差在10ms内的就进行融合优化，否则一直找到GPS时间戳大于VIO时间戳+10ms时为止
     while (!gpsQueue.empty())
     {
         // 获得最老的GPS数据和其时间
@@ -120,7 +124,7 @@ void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
                 pos_accuracy = 1;
             // printf("receive covariance %lf \n", pos_accuracy);
             // if(GPS_msg->status.status > 8)
-            // 向globalEstimator中输入GPS数据
+            // 向globalEstimator中输入GPS数据，newGPS会被设置为true，然后优化函数就会执行
             globalEstimator.inputGPS(t, latitude, longitude, altitude, pos_accuracy);
             gpsQueue.pop();
             // 此处break,意味只存储了一个GPS数据后就break了。后来想明白了GPS不同于imu，是绝对位置
@@ -152,11 +156,11 @@ void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
     odometry.pose.pose.orientation.y = global_q.y();
     odometry.pose.pose.orientation.z = global_q.z();
     odometry.pose.pose.orientation.w = global_q.w();
-    // 发布里程计
+    // 发布里程计，这时候发布时最新的位置信息
     pub_global_odometry.publish(odometry);
     // 发布全局路径
     pub_global_path.publish(*global_path);
-    // 发布车辆模型到指定的位置，效果就是车模型会根据融合结果进行移动
+    // 发布车辆模型到指定的位置，效果就是车模型会根据融合结果进行移动，注意，此时的global_t，global_q是最新的vio数据
     publish_car_model(t, global_t, global_q);
 
     // write result to file
