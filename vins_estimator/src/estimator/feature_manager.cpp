@@ -227,6 +227,7 @@ VectorXd FeatureManager::getDepthVector()
     return dep_vec;
 }
 
+// 利用svd方法对双目进行三角化
 void FeatureManager::triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen::Matrix<double, 3, 4> &Pose1,
                                       Eigen::Vector2d &point0, Eigen::Vector2d &point1, Eigen::Vector3d &point_3d)
 {
@@ -287,6 +288,7 @@ bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P,
     return true;
 }
 
+// 有了深度，当下一帧照片来到以后就可以利用pnp求解位姿了
 void FeatureManager::initFramePoseByPnP(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vector3d tic[], Matrix3d ric[])
 {
 
@@ -330,6 +332,8 @@ void FeatureManager::initFramePoseByPnP(int frameCnt, Vector3d Ps[], Matrix3d Rs
     }
 }
 
+// 双目三角化
+// 结果放入了feature的estimated_depth中
 void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vector3d tic[], Matrix3d ric[])
 {
     for (auto &it_per_id : feature)

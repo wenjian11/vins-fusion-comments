@@ -741,11 +741,19 @@ bool Estimator::initialStructure()
     }
 }
 
+// 联合初始化visualInitialAlign()大致分为以下四个步骤：
+
+// 初始化陀螺仪的bias，估计估计重力、速度以及尺度初始值
+// 将g和理想重力加速度方向（0，0，1）进行对齐，同时将偏航角修正为0。
+// 将位移Ps、速度Vs从相机坐标系转换到IMU坐标系下。
+// 重新计算各个特征点的深度
 bool Estimator::visualInitialAlign()
 {
     TicToc t_g;
     VectorXd x;
     // solve scale
+    // 初始化陀螺仪的bias
+    // 估计重力、速度、以及尺度初始值
     bool result = VisualIMUAlignment(all_image_frame, Bgs, g, x);
     if (!result)
     {
@@ -754,6 +762,8 @@ bool Estimator::visualInitialAlign()
     }
 
     // change state
+    // 将位移Ps，速度Vs从相机坐标系转换到IMU坐标系
+    // Rs已经在IMU坐标系下
     for (int i = 0; i <= frame_count; i++)
     {
         Matrix3d Ri = all_image_frame[Headers[i]].R;
@@ -764,6 +774,8 @@ bool Estimator::visualInitialAlign()
     }
 
     double s = (x.tail<1>())(0);
+    // 对之前预积分得到的结果进行更新。
+    // 预积分的好处查看就在于你得到新的Bgs，不需要又重新再积分一遍，可以通过Bgs对位姿，速度的一阶导数，进行线性近似，得到新的Bgs求解出MU的最终结果。
     for (int i = 0; i <= WINDOW_SIZE; i++)
     {
         pre_integrations[i]->repropagate(Vector3d::Zero(), Bgs[i]);
@@ -781,11 +793,13 @@ bool Estimator::visualInitialAlign()
         }
     }
 
+    // 重力加速度g是从相机坐标系c0(参考帧)中的值，将g和理想重力加速度方向（0，0,1）进行对齐，同时将偏航修正为0
     Matrix3d R0 = Utility::g2R(g);
     double yaw = Utility::R2ypr(R0 * Rs[0]).x();
     R0 = Utility::ypr2R(Eigen::Vector3d{-yaw, 0, 0}) * R0;
     g = R0 * g;
     // Matrix3d rot_diff = R0 * Rs[0].transpose();
+    // 按照重力加速度g修正的幅度，对位姿进行修正
     Matrix3d rot_diff = R0;
     for (int i = 0; i <= frame_count; i++)
     {
@@ -795,34 +809,46 @@ bool Estimator::visualInitialAlign()
     }
     ROS_DEBUG_STREAM("g0     " << g.transpose());
     ROS_DEBUG_STREAM("my R0  " << Utility::R2ypr(Rs[0]).transpose());
-
+    // 重新计算各个特征点的深度
     f_manager.clearDepth();
     f_manager.triangulate(frame_count, Ps, Rs, tic, ric);
 
     return true;
 }
 
+// 是从第二帧开始，检查哪一帧相对于当前帧同时满足下面三点，返回参考帧的帧号l（小写的L）：
+// 两帧同时观测到的特征点数目超过20个
+// 平均视差*460>30
+// 在对积几何中起作用的特征点数目大于12
 bool Estimator::relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l)
 {
     // find previous frame which contians enough correspondance and parallex with newest frame
     for (int i = 0; i < WINDOW_SIZE; i++)
     {
-        vector<pair<Vector3d, Vector3d>> corres;
+        vector<pair<Vector3d, Vector3d>> corres; // 用于存储特征点对
+        // 获取每一帧和最后一帧同时观察到的特征点
         corres = f_manager.getCorresponding(i, WINDOW_SIZE);
+        // 条件1同时观察到的特征点数目超过20个
         if (corres.size() > 20)
         {
+            // 声明了两个用于存储视差的变量，sum_parallax 用于存储总视差，average_parallax 用于存储平均视差
             double sum_parallax = 0;
             double average_parallax;
             for (int j = 0; j < int(corres.size()); j++)
             {
+                // 从特征点对中提取出两个二维点 pts_0 和 pts_1
                 Vector2d pts_0(corres[j].first(0), corres[j].first(1));
                 Vector2d pts_1(corres[j].second(0), corres[j].second(1));
+                // 这行代码计算了两个特征点之间的视差，并将其加到 sum_parallax 中
                 double parallax = (pts_0 - pts_1).norm();
                 sum_parallax = sum_parallax + parallax;
             }
+            // 计算平均视差
             average_parallax = 1.0 * sum_parallax / int(corres.size());
+            // 条件2平均视差*460>30  条件3 在对极几何中起作用的特征点数目大于12，检查平均视差是否大于阈值，并调用 m_estimator 对象的 solveRelativeRT 方法进行相对位姿估计
             if (average_parallax * 460 > 30 && m_estimator.solveRelativeRT(corres, relative_R, relative_T))
             {
+                // 从最早的帧开始检查，当满足条件1 2 3 后，确认relativePose成功，并返回当前帧的帧号
                 l = i;
                 ROS_DEBUG("average_parallax %f choose l %d and newest frame to triangulate the whole structure", average_parallax * 460, l);
                 return true;
