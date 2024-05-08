@@ -1,8 +1,8 @@
 /*******************************************************
  * Copyright (C) 2019, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *
@@ -41,7 +41,7 @@ queue<nav_msgs::Odometry::ConstPtr> pose_buf;
 queue<Eigen::Vector3d> odometry_buf;
 std::mutex m_buf;
 std::mutex m_process;
-int frame_index  = 0;
+int frame_index = 0;
 int sequence = 1;
 PoseGraph posegraph;
 int skip_first_cnt = 0;
@@ -86,24 +86,24 @@ void new_sequence()
     posegraph.posegraph_visualization->reset();
     posegraph.publish();
     m_buf.lock();
-    while(!image_buf.empty())
+    while (!image_buf.empty())
         image_buf.pop();
-    while(!point_buf.empty())
+    while (!point_buf.empty())
         point_buf.pop();
-    while(!pose_buf.empty())
+    while (!pose_buf.empty())
         pose_buf.pop();
-    while(!odometry_buf.empty())
+    while (!odometry_buf.empty())
         odometry_buf.pop();
     m_buf.unlock();
 }
 
 void image_callback(const sensor_msgs::ImageConstPtr &image_msg)
 {
-    //ROS_INFO("image_callback!");
+    // ROS_INFO("image_callback!");
     m_buf.lock();
     image_buf.push(image_msg);
     m_buf.unlock();
-    //printf(" image time %f \n", image_msg->header.stamp.toSec());
+    // printf(" image time %f \n", image_msg->header.stamp.toSec());
 
     // detect unstable camera stream
     if (last_image_time == -1)
@@ -118,14 +118,14 @@ void image_callback(const sensor_msgs::ImageConstPtr &image_msg)
 
 void point_callback(const sensor_msgs::PointCloudConstPtr &point_msg)
 {
-    //ROS_INFO("point_callback!");
+    // ROS_INFO("point_callback!");
     m_buf.lock();
     point_buf.push(point_msg);
     m_buf.unlock();
     /*
     for (unsigned int i = 0; i < point_msg->points.size(); i++)
     {
-        printf("%d, 3D point: %f, %f, %f 2D point %f, %f \n",i , point_msg->points[i].x, 
+        printf("%d, 3D point: %f, %f, %f 2D point %f, %f \n",i , point_msg->points[i].x,
                                                      point_msg->points[i].y,
                                                      point_msg->points[i].z,
                                                      point_msg->channels[i].values[0],
@@ -174,7 +174,7 @@ void margin_point_callback(const sensor_msgs::PointCloudConstPtr &point_msg)
 
 void pose_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
 {
-    //ROS_INFO("pose_callback!");
+    // ROS_INFO("pose_callback!");
     m_buf.lock();
     pose_buf.push(pose_msg);
     m_buf.unlock();
@@ -191,7 +191,7 @@ void pose_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
 
 void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
 {
-    //ROS_INFO("vio_callback!");
+    // ROS_INFO("vio_callback!");
     Vector3d vio_t(pose_msg->pose.pose.position.x, pose_msg->pose.pose.position.y, pose_msg->pose.pose.position.z);
     Quaterniond vio_q;
     vio_q.w() = pose_msg->pose.pose.orientation.w;
@@ -200,7 +200,7 @@ void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
     vio_q.z() = pose_msg->pose.pose.orientation.z;
 
     vio_t = posegraph.w_r_vio * vio_t + posegraph.w_t_vio;
-    vio_q = posegraph.w_r_vio *  vio_q;
+    vio_q = posegraph.w_r_vio * vio_q;
 
     vio_t = posegraph.r_drift * vio_t + posegraph.t_drift;
     vio_q = posegraph.r_drift * vio_q;
@@ -220,13 +220,11 @@ void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
     Vector3d vio_t_cam;
     Quaterniond vio_q_cam;
     vio_t_cam = vio_t + vio_q * tic;
-    vio_q_cam = vio_q * qic;        
+    vio_q_cam = vio_q * qic;
 
     cameraposevisual.reset();
     cameraposevisual.add_pose(vio_t_cam, vio_q_cam);
     cameraposevisual.publish_by(pub_camera_pose_visual, pose_msg->header);
-
-
 }
 
 void extrinsic_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
@@ -238,10 +236,12 @@ void extrinsic_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
     qic = Quaterniond(pose_msg->pose.pose.orientation.w,
                       pose_msg->pose.pose.orientation.x,
                       pose_msg->pose.pose.orientation.y,
-                      pose_msg->pose.pose.orientation.z).toRotationMatrix();
+                      pose_msg->pose.pose.orientation.z)
+              .toRotationMatrix();
     m_process.unlock();
 }
 
+// process主要的作用是开启一个新线程，这一块为程序的主要执行部分
 void process()
 {
     while (true)
@@ -251,8 +251,18 @@ void process()
         nav_msgs::Odometry::ConstPtr pose_msg = NULL;
 
         // find out the messages with same time stamp
+        // 首先process需要先判断image_buf,pose_buf,point_buf三个buff都不为空的时候，才进行运行，否则程序就休息5毫秒，继续监测
+        // image_buf，存放image_callback()图像回调函数的信息，接收相机话题的原始图片。并且当两张图片的时间戳相差1秒，或者说当图像的时间戳小于上一帧的时间戳，可以认为图像出现新序列，因此new_sequence()
+        // point_buf,存放point_callback()关键帧的三维特征点信息的回调。并且在这个回调函数中，同时利用point_cloud标准数据结构发布特征点三维点云以供可视化操作。发布的话题为：point_cloud_loop_rect。注意，
+        // 此时的点云信息不是单纯vio得到的点云信息，而是在pose_graph参考坐标系下，关键帧点云的位置。因为vio自己有一个参考坐标系，而pose_graph求解出来的位姿图也有自己的坐标系，这两个坐标系有一个变换关系，
+        // 写在了pose_graph.r_drift,pose_graph.t_drift里面。
+        // pose_buf，存放pose_callback()回调函数的信息。订阅的是关键帧的vio得到的关键帧的位姿信息。
+        // 接着程序开始找一帧keyframe 对应的image_buf，point_buf，pose_buf三者的数据。即point_buf和pose_buf这个存储的点云和位姿是对应（image_buf里面的）哪一帧关键帧。最终的结果
+        // （1）image_msg存放关键帧的图像原始信息
+        // （2）point_msg存放了该关键帧里面的3D点云信息，由VIO以及pose_graph.r_drift, pose_graph.t_drift 解算得到。
+        // （3）pose_msg存放了该关键帧的位姿信息。
         m_buf.lock();
-        if(!image_buf.empty() && !point_buf.empty() && !pose_buf.empty())
+        if (!image_buf.empty() && !point_buf.empty() && !pose_buf.empty())
         {
             if (image_buf.front()->header.stamp.toSec() > pose_buf.front()->header.stamp.toSec())
             {
@@ -264,8 +274,7 @@ void process()
                 point_buf.pop();
                 printf("throw point at beginning\n");
             }
-            else if (image_buf.back()->header.stamp.toSec() >= pose_buf.front()->header.stamp.toSec() 
-                && point_buf.back()->header.stamp.toSec() >= pose_buf.front()->header.stamp.toSec())
+            else if (image_buf.back()->header.stamp.toSec() >= pose_buf.front()->header.stamp.toSec() && point_buf.back()->header.stamp.toSec() >= pose_buf.front()->header.stamp.toSec())
             {
                 pose_msg = pose_buf.front();
                 pose_buf.pop();
@@ -286,10 +295,10 @@ void process()
 
         if (pose_msg != NULL)
         {
-            //printf(" pose time %f \n", pose_msg->header.stamp.toSec());
-            //printf(" point time %f \n", point_msg->header.stamp.toSec());
-            //printf(" image time %f \n", image_msg->header.stamp.toSec());
-            // skip fisrt few
+            // printf(" pose time %f \n", pose_msg->header.stamp.toSec());
+            // printf(" point time %f \n", point_msg->header.stamp.toSec());
+            // printf(" image time %f \n", image_msg->header.stamp.toSec());
+            //  skip fisrt few
             if (skip_first_cnt < SKIP_FIRST_CNT)
             {
                 skip_first_cnt++;
@@ -321,7 +330,7 @@ void process()
             }
             else
                 ptr = cv_bridge::toCvCopy(image_msg, sensor_msgs::image_encodings::MONO8);
-            
+
             cv::Mat image = ptr->image;
             // build keyframe
             Vector3d T = Vector3d(pose_msg->pose.pose.position.x,
@@ -330,20 +339,23 @@ void process()
             Matrix3d R = Quaterniond(pose_msg->pose.pose.orientation.w,
                                      pose_msg->pose.pose.orientation.x,
                                      pose_msg->pose.pose.orientation.y,
-                                     pose_msg->pose.pose.orientation.z).toRotationMatrix();
-            if((T - last_t).norm() > SKIP_DIS)
+                                     pose_msg->pose.pose.orientation.z)
+                             .toRotationMatrix();
+            // 位姿平移量间隔（关键帧）
+            if ((T - last_t).norm() > SKIP_DIS)
             {
-                vector<cv::Point3f> point_3d; 
-                vector<cv::Point2f> point_2d_uv; 
+                vector<cv::Point3f> point_3d;
+                vector<cv::Point2f> point_2d_uv;
                 vector<cv::Point2f> point_2d_normal;
                 vector<double> point_id;
-
+                // 特征点
                 for (unsigned int i = 0; i < point_msg->points.size(); i++)
                 {
                     cv::Point3f p_3d;
                     p_3d.x = point_msg->points[i].x;
                     p_3d.y = point_msg->points[i].y;
                     p_3d.z = point_msg->points[i].z;
+                    // 世界坐标
                     point_3d.push_back(p_3d);
 
                     cv::Point2f p_2d_uv, p_2d_normal;
@@ -353,17 +365,21 @@ void process()
                     p_2d_uv.x = point_msg->channels[i].values[2];
                     p_2d_uv.y = point_msg->channels[i].values[3];
                     p_id = point_msg->channels[i].values[4];
+                    // 归一化相机平面坐标
                     point_2d_normal.push_back(p_2d_normal);
+                    // 像素坐标
                     point_2d_uv.push_back(p_2d_uv);
+                    // 特征点id
                     point_id.push_back(p_id);
 
-                    //printf("u %f, v %f \n", p_2d_uv.x, p_2d_uv.y);
+                    // printf("u %f, v %f \n", p_2d_uv.x, p_2d_uv.y);
                 }
-
-                KeyFrame* keyframe = new KeyFrame(pose_msg->header.stamp.toSec(), frame_index, T, R, image,
-                                   point_3d, point_2d_uv, point_2d_normal, point_id, sequence);   
+                // 构造关键帧
+                KeyFrame *keyframe = new KeyFrame(pose_msg->header.stamp.toSec(), frame_index, T, R, image,
+                                                  point_3d, point_2d_uv, point_2d_normal, point_id, sequence);
                 m_process.lock();
                 start_flag = 1;
+                // 添加关键帧
                 posegraph.addKeyFrame(keyframe, 1);
                 m_process.unlock();
                 frame_index++;
@@ -375,9 +391,11 @@ void process()
     }
 }
 
+// 而command是开启一个控制台键盘控制线程。键盘控制输入，有提供两种选择，在控制台上写入：‘s’：把当前Posegraph存储起来，
+// 并且把整个loop_fusion包的进程关掉。‘n’：图像更新序列,new_sequence()
 void command()
 {
-    while(1)
+    while (1)
     {
         char c = getchar();
         if (c == 's')
@@ -402,25 +420,25 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "loop_fusion");
     ros::NodeHandle n("~");
     posegraph.registerPub(n);
-    
+
     VISUALIZATION_SHIFT_X = 0;
     VISUALIZATION_SHIFT_Y = 0;
     SKIP_CNT = 0;
     SKIP_DIS = 0;
 
-    if(argc != 2)
+    if (argc != 2)
     {
         printf("please intput: rosrun loop_fusion loop_fusion_node [config file] \n"
                "for example: rosrun loop_fusion loop_fusion_node "
                "/home/tony-ws1/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_imu_config.yaml \n");
         return 0;
     }
-    
+
     string config_file = argv[1];
     printf("config_file: %s\n", argv[1]);
 
     cv::FileStorage fsSettings(config_file, cv::FileStorage::READ);
-    if(!fsSettings.isOpened())
+    if (!fsSettings.isOpened())
     {
         std::cerr << "ERROR: Wrong path to settings" << std::endl;
     }
@@ -449,7 +467,7 @@ int main(int argc, char **argv)
     printf("cam calib path: %s\n", cam0Path.c_str());
     m_camera = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(cam0Path.c_str());
 
-    fsSettings["image0_topic"] >> IMAGE_TOPIC;        
+    fsSettings["image0_topic"] >> IMAGE_TOPIC;
     fsSettings["pose_graph_save_path"] >> POSE_GRAPH_SAVE_PATH;
     fsSettings["output_path"] >> VINS_RESULT_PATH;
     fsSettings["save_image"] >> DEBUG_IMAGE;
@@ -477,11 +495,15 @@ int main(int argc, char **argv)
         printf("no previous pose graph\n");
         load_flag = 1;
     }
-
+    // 订阅里程计
     ros::Subscriber sub_vio = n.subscribe("/vins_estimator/odometry", 2000, vio_callback);
+    // 订阅图像
     ros::Subscriber sub_image = n.subscribe(IMAGE_TOPIC, 2000, image_callback);
+    // 订阅关键帧位姿
     ros::Subscriber sub_pose = n.subscribe("/vins_estimator/keyframe_pose", 2000, pose_callback);
+    // 订阅外参
     ros::Subscriber sub_extrinsic = n.subscribe("/vins_estimator/extrinsic", 2000, extrinsic_callback);
+    // 订阅关键帧特征点
     ros::Subscriber sub_point = n.subscribe("/vins_estimator/keyframe_point", 2000, point_callback);
     ros::Subscriber sub_margin_point = n.subscribe("/vins_estimator/margin_cloud", 2000, margin_point_callback);
 
@@ -496,7 +518,7 @@ int main(int argc, char **argv)
 
     measurement_process = std::thread(process);
     keyboard_command_process = std::thread(command);
-    
+
     ros::spin();
 
     return 0;
