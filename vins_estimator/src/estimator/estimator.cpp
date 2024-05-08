@@ -159,24 +159,40 @@ void Estimator::changeSensorType(int use_imu, int use_stereo)
     }
 }
 
+/**
+ * 输入一帧图像
+ * 1、featureTracker，提取当前帧特征点
+ * 2、添加一帧特征点，processMeasurements处理
+ */
 void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
 {
     inputImageCnt++;
+    // 特征点id，(x,y,z,pu,pv,vx,vy)
     map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
     TicToc featureTrackerTime;
 
+    /**
+     * 跟踪一帧图像，提取当前帧特征点
+     * 1、用前一帧运动估计特征点在当前帧中的位置，如果特征点没有速度，就直接用前一帧该点位置
+     * 2、LK光流跟踪前一帧的特征点，正反向，删除跟丢的点；如果是双目，进行左右匹配，只删右目跟丢的特征点
+     * 3、对于前后帧用LK光流跟踪到的匹配特征点，计算基础矩阵，用极线约束进一步剔除outlier点（代码注释掉了）
+     * 4、如果特征点不够，剩余的用角点来凑；更新特征点跟踪次数
+     * 5、计算特征点归一化相机平面坐标，并计算相对与前一帧移动速度
+     * 6、保存当前帧特征点数据（归一化相机平面坐标，像素坐标，归一化相机平面移动速度）
+     * 7、展示，左图特征点用颜色区分跟踪次数（红色少，蓝色多），画个箭头指向前一帧特征点位置，如果是双目，右图画个绿色点
+     */
     if (_img1.empty())
         featureFrame = featureTracker.trackImage(t, _img);
     else
         featureFrame = featureTracker.trackImage(t, _img, _img1);
     // printf("featureTracker time: %f\n", featureTrackerTime.toc());
-
+    // 发布跟踪图像
     if (SHOW_TRACK)
     {
         cv::Mat imgTrack = featureTracker.getTrackImage();
         pubTrackImage(imgTrack, t);
     }
-
+    // 添加一帧特征点，处理
     if (MULTIPLE_THREAD)
     {
         if (inputImageCnt % 2 == 0)
@@ -407,6 +423,26 @@ void Estimator::processIMU(double t, double dt, const Vector3d &linear_accelerat
     gyr_0 = angular_velocity;
 }
 
+// 其中包含了检测关键帧,估计外部参数,初始化,状态估计,划窗等等。
+/**
+ * 处理一帧图像特征
+ * 1、提取前一帧与当前帧的匹配点
+ * 2、在线标定外参旋转
+ *     利用两帧之间的Camera旋转和IMU积分旋转，构建最小二乘问题，SVD求解外参旋转
+ *     1) Camera系，两帧匹配点计算本质矩阵E，分解得到四个解，根据三角化成功点比例确定最终正确解R、t，得到两帧之间的旋转R
+ *     2) IMU系，积分计算两帧之间的旋转
+ *     3) 根据旋转构建最小二乘问题，SVD求解外参旋转
+ * 3、系统初始化
+ * 4、3d-2d Pnp求解当前帧位姿
+ * 5、三角化当前帧特征点
+ * 6、滑窗执行Ceres优化，边缘化，更新滑窗内图像帧的状态（位姿、速度、偏置、外参、逆深度、相机与IMU时差）
+ * 7、剔除outlier点
+ * 8、用当前帧与前一帧位姿变换，估计下一帧位姿，初始化下一帧特征点的位置
+ * 9、移动滑窗，更新特征点的观测帧集合、观测帧索引（在滑窗中的位置）、首帧观测帧和深度值，删除没有观测帧的特征点
+ * 10、删除优化后深度值为负的特征点
+ * @param image  图像帧特征
+ * @param header 时间戳
+ */
 void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const double header)
 {
     ROS_DEBUG("new image coming ------------------------------------------");

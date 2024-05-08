@@ -447,6 +447,11 @@ void PoseGraph::addKeyFrameIntoVoc(KeyFrame *keyframe)
     db.add(keyframe->brief_descriptors);
 }
 
+// optimize_buf一有东西，意味着该帧已经被检测出回环了，因此就开始优化，
+// 优化的对象就是keyframelist中每个关键帧的四个自由度，包括x,y,z,yaw。同样是ceres问题求解
+/**
+ * 构建图优化，优化位姿，（x,y,z,yaw）
+ */
 void PoseGraph::optimize4DoF()
 {
     while (true)
@@ -466,6 +471,7 @@ void PoseGraph::optimize4DoF()
             printf("optimize pose graph \n");
             TicToc tmp_t;
             m_keyframelist.lock();
+            // 当前帧
             KeyFrame *cur_kf = getKeyFrame(cur_index);
 
             int max_length = cur_index + 1;
@@ -492,6 +498,7 @@ void PoseGraph::optimize4DoF()
             list<KeyFrame *>::iterator it;
 
             int i = 0;
+            // 遍历关键帧集合，从最早闭环帧到当前帧之间，构建优化图
             for (it = keyframelist.begin(); it != keyframelist.end(); it++)
             {
                 if ((*it)->index < first_looped_index)
@@ -524,6 +531,7 @@ void PoseGraph::optimize4DoF()
                 }
 
                 // add edge
+                // 添加边，每一帧与前面4帧建立边
                 for (int j = 1; j < 5; j++)
                 {
                     if (i - j >= 0 && sequence_array[i] == sequence_array[i - j])
@@ -542,7 +550,7 @@ void PoseGraph::optimize4DoF()
                 }
 
                 // add loop edge
-
+                // 添加闭环边，与闭环帧建立边
                 if ((*it)->has_loop)
                 {
                     assert((*it)->loop_index >= first_looped_index);
@@ -577,6 +585,7 @@ void PoseGraph::optimize4DoF()
             */
             m_keyframelist.lock();
             i = 0;
+            // 更新图中顶点位姿，闭环帧到当前帧之间（不包括当前帧）
             for (it = keyframelist.begin(); it != keyframelist.end(); it++)
             {
                 if ((*it)->index < first_looped_index)
@@ -594,9 +603,12 @@ void PoseGraph::optimize4DoF()
 
             Vector3d cur_t, vio_t;
             Matrix3d cur_r, vio_r;
+            // 当前帧优化后位姿 todo
             cur_kf->getPose(cur_t, cur_r);
+            // 当前帧优化前位姿
             cur_kf->getVioPose(vio_t, vio_r);
             m_drift.lock();
+            // 计算优化前后位姿差量
             yaw_drift = Utility::R2ypr(cur_r).x() - Utility::R2ypr(vio_r).x();
             r_drift = Utility::ypr2R(Vector3d(yaw_drift, 0, 0));
             t_drift = cur_t - r_drift * vio_t;
@@ -606,6 +618,7 @@ void PoseGraph::optimize4DoF()
             // cout << "yaw drift " << yaw_drift << endl;
 
             it++;
+            // 更新当前帧之后的关键帧位姿
             for (; it != keyframelist.end(); it++)
             {
                 Vector3d P;
