@@ -451,6 +451,7 @@ void PoseGraph::addKeyFrameIntoVoc(KeyFrame *keyframe)
 // 优化的对象就是keyframelist中每个关键帧的四个自由度，包括x,y,z,yaw。同样是ceres问题求解
 /**
  * 构建图优化，优化位姿，（x,y,z,yaw）
+ * 其中“4DoF”表示四自由度（三个平移自由度和一个旋转自由度）
  */
 void PoseGraph::optimize4DoF()
 {
@@ -459,6 +460,7 @@ void PoseGraph::optimize4DoF()
         int cur_index = -1;
         int first_looped_index = -1;
         m_optimize_buf.lock();
+        // 循环处理优化缓冲区中的任务，直到缓冲区为空。在每次循环中，从缓冲区中取出队首元素（即当前关键帧索引），并将其存入cur_index中，同时将earliest_loop_index的值存入first_looped_index中，然后从缓冲区中移除该元素。
         while (!optimize_buf.empty())
         {
             cur_index = optimize_buf.front();
@@ -468,12 +470,14 @@ void PoseGraph::optimize4DoF()
         m_optimize_buf.unlock();
         if (cur_index != -1)
         {
+            // 打印一条消息，表示开始对位姿图进行优化，并创建一个TicToc对象tmp_t用于计时。
             printf("optimize pose graph \n");
             TicToc tmp_t;
+            // 对关键帧列表进行加锁，确保多线程环境下对列表的安全访问。
             m_keyframelist.lock();
-            // 当前帧
+            // 当前帧  根据当前关键帧索引cur_index获取对应的关键帧对象指针
             KeyFrame *cur_kf = getKeyFrame(cur_index);
-
+            // 定义用于存储位姿和序列信息的数组，数组大小为当前关键帧索引加1
             int max_length = cur_index + 1;
 
             // w^t_i   w^q_i
@@ -481,7 +485,7 @@ void PoseGraph::optimize4DoF()
             Quaterniond q_array[max_length];
             double euler_array[max_length][3];
             double sequence_array[max_length];
-
+            // 创建一个用于优化的Ceres求解问题problem，设置求解选项，并创建一个Huber损失函数loss_function，用于处理残差项
             ceres::Problem problem;
             ceres::Solver::Options options;
             options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
@@ -492,6 +496,7 @@ void PoseGraph::optimize4DoF()
             ceres::LossFunction *loss_function;
             loss_function = new ceres::HuberLoss(0.1);
             // loss_function = new ceres::CauchyLoss(1.0);
+            // 创建一个本地参数化对象angle_local_parameterization，用于处理旋转角度的参数化
             ceres::LocalParameterization *angle_local_parameterization =
                 AngleLocalParameterization::Create();
 
@@ -504,6 +509,7 @@ void PoseGraph::optimize4DoF()
                 if ((*it)->index < first_looped_index)
                     continue;
                 (*it)->local_index = i;
+                // 获取当前关键帧的视觉里程计位姿信息，将其转换为旋转矩阵和平移向量，并存入相应的数组中。
                 Quaterniond tmp_q;
                 Matrix3d tmp_r;
                 Vector3d tmp_t;
@@ -513,17 +519,17 @@ void PoseGraph::optimize4DoF()
                 t_array[i][1] = tmp_t(1);
                 t_array[i][2] = tmp_t(2);
                 q_array[i] = tmp_q;
-
+                // 将旋转矩阵转换为欧拉角，并存入相应的数组中
                 Vector3d euler_angle = Utility::R2ypr(tmp_q.toRotationMatrix());
                 euler_array[i][0] = euler_angle.x();
                 euler_array[i][1] = euler_angle.y();
                 euler_array[i][2] = euler_angle.z();
-
+                // 将关键帧的序列号存入序列号数组中
                 sequence_array[i] = (*it)->sequence;
-
+                // 将欧拉角和平移向量添加为优化变量，并使用角度本地参数化器来处理欧拉角。
                 problem.AddParameterBlock(euler_array[i], 1, angle_local_parameterization);
                 problem.AddParameterBlock(t_array[i], 3);
-
+                // 如果当前关键帧是最早闭环帧，或者序列号为0，则将其设置为优化问题中的固定参数
                 if ((*it)->index == first_looped_index || (*it)->sequence == 0)
                 {
                     problem.SetParameterBlockConstant(euler_array[i]);
@@ -532,6 +538,7 @@ void PoseGraph::optimize4DoF()
 
                 // add edge
                 // 添加边，每一帧与前面4帧建立边
+                // 针对当前关键帧与前面4帧建立边，计算相对位移和相对航向角。
                 for (int j = 1; j < 5; j++)
                 {
                     if (i - j >= 0 && sequence_array[i] == sequence_array[i - j])
@@ -540,6 +547,7 @@ void PoseGraph::optimize4DoF()
                         Vector3d relative_t(t_array[i][0] - t_array[i - j][0], t_array[i][1] - t_array[i - j][1], t_array[i][2] - t_array[i - j][2]);
                         relative_t = q_array[i - j].inverse() * relative_t;
                         double relative_yaw = euler_array[i][0] - euler_array[i - j][0];
+                        // 创建残差项，并将其添加到优化问题中，用于约束优化变量
                         ceres::CostFunction *cost_function = FourDOFError::Create(relative_t.x(), relative_t.y(), relative_t.z(),
                                                                                   relative_yaw, euler_conncected.y(), euler_conncected.z());
                         problem.AddResidualBlock(cost_function, NULL, euler_array[i - j],
@@ -551,6 +559,7 @@ void PoseGraph::optimize4DoF()
 
                 // add loop edge
                 // 添加闭环边，与闭环帧建立边
+                // 如果当前关键帧存在闭环，则处理闭环边信息
                 if ((*it)->has_loop)
                 {
                     assert((*it)->loop_index >= first_looped_index);
@@ -559,6 +568,7 @@ void PoseGraph::optimize4DoF()
                     Vector3d relative_t;
                     relative_t = (*it)->getLoopRelativeT();
                     double relative_yaw = (*it)->getLoopRelativeYaw();
+                    // 创建闭环残差项，并将其添加到优化问题中
                     ceres::CostFunction *cost_function = FourDOFWeightError::Create(relative_t.x(), relative_t.y(), relative_t.z(),
                                                                                     relative_yaw, euler_conncected.y(), euler_conncected.z());
                     problem.AddResidualBlock(cost_function, loss_function, euler_array[connected_index],
@@ -572,7 +582,7 @@ void PoseGraph::optimize4DoF()
                 i++;
             }
             m_keyframelist.unlock();
-
+            // 调用Ceres求解器对优化问题进行求解。
             ceres::Solve(options, &problem, &summary);
             // std::cout << summary.BriefReport() << "\n";
 
@@ -590,17 +600,18 @@ void PoseGraph::optimize4DoF()
             {
                 if ((*it)->index < first_looped_index)
                     continue;
+                // 更新关键帧的位姿信息
                 Quaterniond tmp_q;
                 tmp_q = Utility::ypr2R(Vector3d(euler_array[i][0], euler_array[i][1], euler_array[i][2]));
                 Vector3d tmp_t = Vector3d(t_array[i][0], t_array[i][1], t_array[i][2]);
                 Matrix3d tmp_r = tmp_q.toRotationMatrix();
                 (*it)->updatePose(tmp_t, tmp_r);
-
+                // 更新迭代计数器i，并在遍历到当前关键帧后退出循环
                 if ((*it)->index == cur_index)
                     break;
                 i++;
             }
-
+            // 获取当前关键帧的优化后位姿和优化前位姿
             Vector3d cur_t, vio_t;
             Matrix3d cur_r, vio_r;
             // 当前帧优化后位姿 todo
