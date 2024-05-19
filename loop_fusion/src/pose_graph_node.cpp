@@ -420,7 +420,7 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "loop_fusion");
     ros::NodeHandle n("~");
     posegraph.registerPub(n);
-
+    // 和mono不同之处是直接赋值
     VISUALIZATION_SHIFT_X = 0;
     VISUALIZATION_SHIFT_Y = 0;
     SKIP_CNT = 0;
@@ -442,13 +442,13 @@ int main(int argc, char **argv)
     {
         std::cerr << "ERROR: Wrong path to settings" << std::endl;
     }
-
+    // 设置可视化参数
     cameraposevisual.setScale(0.1);
     cameraposevisual.setLineWidth(0.01);
 
     std::string IMAGE_TOPIC;
     int LOAD_PREVIOUS_POSE_GRAPH;
-
+    // 与Mono不同直接不要判断是否回环
     ROW = fsSettings["image_height"];
     COL = fsSettings["image_width"];
     std::string pkg_path = ros::package::getPath("loop_fusion");
@@ -465,6 +465,7 @@ int main(int argc, char **argv)
     fsSettings["cam0_calib"] >> cam0Calib;
     std::string cam0Path = configPath + "/" + cam0Calib;
     printf("cam calib path: %s\n", cam0Path.c_str());
+    // 和前面一样，生成一个相机模型回环读入的yaml文件
     m_camera = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(cam0Path.c_str());
 
     fsSettings["image0_topic"] >> IMAGE_TOPIC;
@@ -474,6 +475,7 @@ int main(int argc, char **argv)
 
     LOAD_PREVIOUS_POSE_GRAPH = fsSettings["load_previous_pose_graph"];
     VINS_RESULT_PATH = VINS_RESULT_PATH + "/vio_loop.csv";
+    // 保存路径文件
     std::ofstream fout(VINS_RESULT_PATH, std::ios::out);
     fout.close();
 
@@ -481,7 +483,7 @@ int main(int argc, char **argv)
     posegraph.setIMUFlag(USE_IMU);
     fsSettings.release();
 
-    if (LOAD_PREVIOUS_POSE_GRAPH)
+    if (LOAD_PREVIOUS_POSE_GRAPH) // 如果有先前的位姿图
     {
         printf("load pose graph\n");
         m_process.lock();
@@ -496,6 +498,7 @@ int main(int argc, char **argv)
         load_flag = 1;
     }
     // 订阅里程计
+    // vio回调函数根据pose_msg中的位姿得到imu位姿和cam位姿
     ros::Subscriber sub_vio = n.subscribe("/vins_estimator/odometry", 2000, vio_callback);
     // 订阅图像
     ros::Subscriber sub_image = n.subscribe(IMAGE_TOPIC, 2000, image_callback);

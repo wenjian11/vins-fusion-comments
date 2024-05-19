@@ -16,6 +16,7 @@ GlobalOptimization::GlobalOptimization()
 {
     initGPS = false;
     newGPS = false;
+    // 首先给的一个单位矩阵，用于初始化，后期会优化
     WGPS_T_WVIO = Eigen::Matrix4d::Identity();
     threadOpt = std::thread(&GlobalOptimization::optimize, this);
 }
@@ -25,6 +26,7 @@ GlobalOptimization::~GlobalOptimization()
     threadOpt.detach();
 }
 
+// 用于将GPS坐标（经度、纬度、高程）转换为三维笛卡尔坐标系（x, y, z）
 void GlobalOptimization::GPS2XYZ(double latitude, double longitude, double altitude, double *xyz)
 {
     if (!initGPS)
@@ -139,6 +141,7 @@ void GlobalOptimization::optimize()
                 q_array[i][1] = iter->second[4];
                 q_array[i][2] = iter->second[5];
                 q_array[i][3] = iter->second[6];
+                // local_parameterization 是一个参数化对象，用于处理四元数的优化问题，确保四元数保持单位长度
                 problem.AddParameterBlock(q_array[i], 4, local_parameterization);
                 problem.AddParameterBlock(t_array[i], 3);
             }
@@ -174,6 +177,10 @@ void GlobalOptimization::optimize()
                                                                                 iQj.w(), iQj.x(), iQj.y(), iQj.z(),
                                                                                 0.1, 0.01);
                     // 将上述创建的代价函数添加到Ceres优化问题中作为残差块。这里使用了四元数和平移向量作为优化变量
+                    // NULL表示使用默认的平方损失函数，这里就可以理解要使得优化之后的vio的数据更加平滑或者是均等，因为只有当每一段的
+                    // 误差基本相等的时候，才会达到最小的平方误差。
+                    // vio_function在创建时使用了localPoseMap中相邻两帧见的平移误差和四元数误差，然后添加残差块的时候，使用globalPoseMap中
+                    // 相邻的t_array和q_array来求平移误差和四元数误差，最后将这两个对应的误差分别相减来构造最后的残差。
                     problem.AddResidualBlock(vio_function, NULL, q_array[i], t_array[i], q_array[i + 1], t_array[i + 1]);
 
                     /*
@@ -219,6 +226,20 @@ void GlobalOptimization::optimize()
                     // printf("inverse weight %f \n", iterGPS->second[3]);
                     // 将上述创建的代价函数添加到Ceres优化问题中作为残差块。这个残差块是用于优化VIO轨迹，
                     // 它将VIO估计的轨迹与GPS轨迹进行比较，并通过最小化它们之间的差异来调整VIO估计的结果。t_array[i]是VIO优化变量，它表示时间戳对应的位姿。
+                    // Ceres求解器会根据代价函数和损失函数，调整这个t_array参数块中的值以最小化残差。
+
+                    // 下面gps_function定义了如何使用t_array[i]计算GPS轨迹的残差，gps_function是一个仿函数，在创建它的时候，
+                    // 使用了iterGPS->second[0], iterGPS->second[1], iterGPS->second[2], iterGPS->second[3]来创建了，就相当于
+                    // 在内部维护了三个值，这个值将来是要被t_array来减去的，就形成了vio和GPS的残差，因为t_array是来自于globalPoseMap的，
+                    // globalPoseMap是未经优化的vio的数据，那么这个代码的含义就是要最小化对应的GPS和vio的位置的距离，
+                    // loss_function是一个Huber损失函数，用于调整距离误差的大小，初始化时设置的是1.0，如果误差小于等于1.0，就使用默认的平方误差，
+                    // 如果损失超过了1.0，就使用Huber损失定义的线性的误差（没有了平方的效果），相当于降低了损失的贡献程度，在优化过程中，对异常值的
+                    // 处理就显得更加温和，降低了异常值对总误差的影响。
+
+                    // 使用 HuberLoss 的具体作用是：
+                    // 使优化过程对异常值（outliers）具有更好的鲁棒性。
+                    // 对小残差进行平方处理（与标准L2范数相同），对大残差进行线性处理，从而减小异常值对总误差的影响。
+                    // 提高优化结果的稳健性，使得最终结果不容易被少量异常值所极大影响。
                     problem.AddResidualBlock(gps_function, loss_function, t_array[i]);
 
                     /*
@@ -243,6 +264,7 @@ void GlobalOptimization::optimize()
 
             // update global pose
             // mPoseMap.lock();
+            // 经过上面的优化之后，t_array和q_array中的数据就是优化后的全局位姿
             iter = globalPoseMap.begin();
             for (int i = 0; i < length; i++, iter++)
             {
@@ -293,6 +315,7 @@ void GlobalOptimization::updateGlobalPath()
     global_path.poses.clear();
     // 定义一个迭代器iter，用于遍历globalPoseMap
     map<double, vector<double>>::iterator iter;
+    // 优化之后，globalPoseMap被重现填入了优化后的数据，就是那些被优化了的t_array, q_array数据
     for (iter = globalPoseMap.begin(); iter != globalPoseMap.end(); iter++)
     {
         // 定义一个geometry_msgs::PoseStamped类型的变量pose_stamped，用于存储位姿信息

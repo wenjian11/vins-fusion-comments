@@ -101,7 +101,8 @@ void PoseGraph::addKeyFrame(KeyFrame *cur_kf, bool flag_detect_loop)
     {
         // printf(" %d detect loop with %d \n", cur_kf->index, loop_index);
         KeyFrame *old_kf = getKeyFrame(loop_index);
-
+        // findConnection 是为了计算相对位姿，最主要的就是利用了PnPRANSAC(matched_2d_old_norm, matched_3d, status, PnP_T_old, PnP_R_old)函数，
+        // 并且它负责把匹配好的点发送到estimator节点中去
         if (cur_kf->findConnection(old_kf))
         {
             if (earliest_loop_index > loop_index || earliest_loop_index == -1)
@@ -111,16 +112,20 @@ void PoseGraph::addKeyFrame(KeyFrame *cur_kf, bool flag_detect_loop)
             Matrix3d w_R_old, w_R_cur, vio_R_cur;
             old_kf->getVioPose(w_P_old, w_R_old);
             cur_kf->getVioPose(vio_P_cur, vio_R_cur);
-
+            // 通过读代码，目前理解的是，在回环除，计算当前帧在回环处历史帧下的位姿，然后和历史帧的平移和旋转作差得出相对的平移和旋转
             Vector3d relative_t;
             Quaterniond relative_q;
+            // findConnection里面计算了相对位姿，用来更新其他帧位姿
             relative_t = cur_kf->getLoopRelativeT();
             relative_q = (cur_kf->getLoopRelativeQ()).toRotationMatrix();
+
             w_P_cur = w_R_old * relative_t + w_P_old;
             w_R_cur = w_R_old * relative_q;
             double shift_yaw;
             Matrix3d shift_r;
             Vector3d shift_t;
+            // 根据old frame 和相对位姿能计算出当前帧位姿，也就能得出和已知当前帧位姿的差别
+            // 分别计算出shift_r, shift_t，用来更新其他帧位姿
             if (use_imu)
             {
                 shift_yaw = Utility::R2ypr(w_R_cur).x() - Utility::R2ypr(vio_R_cur).x();
